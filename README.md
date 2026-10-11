@@ -1,69 +1,74 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- |
+# Edge AI Inference Engine on ESP32 & Cross-MCU Benchmark (TinyML)
 
-# Blink Example
+An on-device machine learning deployment and hardware-level optimization study on the ESP32 platform using the Edge Impulse C++ SDK and ESP-IDF (v5.5). 
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+This project explores the architectural trade-offs of running 8-bit quantized (INT8) vision models on microcontrollers, featuring a direct benchmark between **Xtensa LX6 (ESP32)** and **ARM Cortex-M4 (STM32G491RE)**, alongside model evolution from MobileNetV1 to a high-accuracy Custom ConvNet.
 
-This example demonstrates how to blink a LED by using the GPIO driver or using the [led_strip](https://components.espressif.com/component/espressif/led_strip) library if the LED is addressable e.g. [WS2812](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf). The `led_strip` library is installed via [component manager](main/idf_component.yml).
+---
 
-## How to Use Example
+## 📌 Architectural & Low-Level Optimizations
 
-Before project configuration and build, be sure to set the correct chip target using `idf.py set-target <chip_name>`.
+### 1. PIMPL (Pointer to Implementation) Design Pattern
+* Isolates Edge Impulse C++ SDK dependencies (`signal_t`, `ei_impulse_result_t`) inside the private implementation layer (`Inference::Impl`).
+* Prevents header bloat, decouples the neural network runtime from business logic, and minimizes compilation dependencies across ESP-IDF components.
+* Zero dynamic memory overhead during inference via dynamic tensor streaming callbacks (`GetFeatureCallback`).
 
-### Hardware Required
+### 2. ESP32 Hardware-Software Co-Optimization (ESP-IDF v5.5)
+* **ESP-NN Vector Acceleration:** Integrated Espressif Neural Network (`ESP-NN`) acceleration via `EI_CLASSIFIER_TFLITE_ENABLE_ESP_NN=1` with `-O3` compiler optimization. Inner-loop 8-bit MAC (Multiply-Accumulate) operations are directly mapped to Xtensa LX6 vector assembly instructions.
+* **SPI Flash Bus Tuning (80 MHz QIO):** Reconfigured the external flash bus from the default 40 MHz DIO to **80 MHz QIO (Quad I/O)** via `menuconfig`, quadrupling external memory read bandwidth and eliminating pipeline fetch stalls during inference weights streaming.
 
-* A development board with normal LED or addressable LED on-board (e.g., ESP32-S3-DevKitC, ESP32-C6-DevKitC etc.)
-* A USB cable for Power supply and programming
+---
 
-See [Development Boards](https://www.espressif.com/en/products/devkits) for more information about it.
+## 📊 Cross-MCU Hardware Benchmark (MobileNetV1 96×96 INT8)
 
-### Configure the Project
+A comparative evaluation of an identical INT8 quantized model deployed on two distinct microarchitectures demonstrates that clock speed alone does not dictate TinyML throughput:
 
-Open the project configuration menu (`idf.py menuconfig`).
+| Parameter / Metric | ESP32 | STM32G491RE | Architectural Insight |
+| :--- | :--- | :--- | :--- |
+| **Architecture** | Xtensa LX6 | ARM Cortex-M4 | Dual-core vs. Single-core |
+| **Clock Frequency** | 240 MHz | 170 MHz | ESP32 operates at +41.1% higher frequency |
+| **Compiler Optimization** | `-O3` | `-O3` | Highest optimization level |
+| **Hardware Acceleration** | **ESP-NN** | **CMSIS-NN** (SIMD/DSP) | Microarchitecture-specific vector extensions |
+| **Flash Interface** | 80 MHz QIO (External) | Internal Zero-Wait State | External SPI cache misses vs. tight bus coupling |
+| **Inference Time (Latency)** | **105.00 ms** | **90.00 ms** | **STM32 is 14.3% faster** |
+| **Estimated Clock Cycles** | ~25,200,000 | ~15,300,000 | Cortex-M4 DSP instructions yield higher cycle efficiency |
+| **Target Output (Stop)** | 63.67% | 63.67% | Identical quantization consistency |
+| **Secondary (Pedestrian)** | 16.02% | 16.02% | Identical quantization consistency |
 
-In the `Example Configuration` menu:
+> **Key Takeaway:** Despite the ESP32's 41.1% raw clock advantage, the STM32G491RE achieves a 14.3% lower inference latency. This highlights the cycle-level efficiency of ARM Cortex-M4 DSP/SIMD instructions combined with internal zero-wait-state flash execution over an external QIO flash bus.
 
-* Select the LED type in the `Blink LED type` option.
-  * Use `GPIO` for regular LED
-  * Use `LED strip` for addressable LED
-* If the LED type is `LED strip`, select the backend peripheral
-  * `RMT` is only available for ESP targets with RMT peripheral supported
-  * `SPI` is available for all ESP targets
-* Set the GPIO number used for the signal in the `Blink GPIO number` option.
-* Set the blinking period in the `Blink period in ms` option.
+---
 
-### Build and Flash
+## 📈 Model Evolution on ESP32: Latency vs. Accuracy Trade-Off
 
-Run `idf.py -p PORT flash monitor` to build, flash and monitor the project.
+MobileNetV1 (96×96) provided an ultra-low latency baseline for cross-hardware evaluation, but yielded insufficient confidence for safety-critical traffic sign classification. A Custom ConvNet (64×64) was developed to maximize classification certainty on the edge:
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+| Model Architecture | Input Shape | Quantization | Latency (ms) | Energy Consumption | Top-1 Confidence (Stop) | Evaluation Context |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **MobileNetV1** | 96 × 96 | INT8 | **105.00 ms** | ~52.50 mJ | 63.67% | Cross-MCU performance baseline |
+| **Custom ConvNet** | 64 × 64 | INT8 | **1402.00 ms** | ~729.00 mJ | **93.60%** | Production-ready classification |
 
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
+* **MobileNetV1:** Prioritizes edge throughput (105 ms / ~9.5 FPS equivalent), suitable for high-speed continuous filtering.
+* **Custom ConvNet:** Yields high inference confidence (+29.93% boost) while fitting within the ESP32 internal memory constraints, designed for precision edge validation.
 
-## Example Output
+---
 
-As you run the example, you will see the LED blinking, according to the previously defined period. For the addressable LED, you can also change the LED color by setting the `led_strip_set_pixel(led_strip, 0, 16, 16, 16);` (LED Strip, Pixel Number, Red, Green, Blue) with values from 0 to 255 in the [source file](main/blink_example_main.c).
+## 🛠️ Tech Stack & Toolchain
 
-```text
-I (315) example: Example configured to blink addressable LED!
-I (325) example: Turning the LED OFF!
-I (1325) example: Turning the LED ON!
-I (2325) example: Turning the LED OFF!
-I (3325) example: Turning the LED ON!
-I (4325) example: Turning the LED OFF!
-I (5325) example: Turning the LED ON!
-I (6325) example: Turning the LED OFF!
-I (7325) example: Turning the LED ON!
-I (8325) example: Turning the LED OFF!
-```
+* **Target Hardware:** Espressif ESP32 Series (Xtensa LX6 @ 240 MHz) & STMicroelectronics STM32G491RE
+* **Framework:** ESP-IDF v5.5 (C++17) / CMSIS-NN
+* **ML Engines:** Edge Impulse C++ SDK, ESP-NN, TensorFlow Lite Micro
+* **Build System:** CMake, Ninja
 
-Note: The color order could be different according to the LED model.
+---
 
-The pixel number indicates the pixel position in the LED strip. For a single LED, use 0.
+## 🚀 Build and Flash (ESP-IDF)
 
-## Troubleshooting
-
-* If the LED isn't blinking, check the GPIO or the LED type selection in the `Example Configuration` menu.
-
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+1. **Set the Target:**
+```bash
+    idf.py set-target esp32
+    idf.py menuconfig
+    # Serial flasher config -> Flash SPI speed (80 MHz) -> Flash SPI mode (QIO)
+    idf.py build
+    idf.py -p <PORT> flash monitor
+    ```
