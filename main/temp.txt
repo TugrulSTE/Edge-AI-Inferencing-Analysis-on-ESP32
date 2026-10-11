@@ -1,0 +1,178 @@
+
+inline uint8_t get_gray(uint32_t rgb) {
+    uint8_t r = (rgb >> 16) & 0xFF;
+    uint8_t g = (rgb >> 8)  & 0xFF;
+    uint8_t b =  rgb        & 0xFF;
+    return (uint8_t)((r + g + b) / 3);
+}
+
+// Stack Overflow engellemek için bellek statik alana çekildi (0 Stack Kullanımı)
+static uint8_t local_grid[64][64];
+static int stack_x[4096];
+static int stack_y[4096];
+
+// Özyinelemesiz (Non-recursive) Flood-Fill ve Alan Hesaplama
+int flood_fill_area(uint8_t grid[64][64], int w, int h, int start_x, int start_y, uint8_t fill_val) {
+    if (grid[start_y][start_x] != 0) return 0;
+
+    int top = 0;
+    stack_x[top] = start_x;
+    stack_y[top] = start_y;
+    top++;
+    grid[start_y][start_x] = fill_val;
+
+    int area = 0;
+
+    while (top > 0) {
+        top--;
+        int cx = stack_x[top];
+        int cy = stack_y[top];
+        area++;
+
+        const int dx[] = {0, 0, 1, -1};
+        const int dy[] = {1, -1, 0, 0};
+
+        for (int i = 0; i < 4; i++) {
+            int nx = cx + dx[i];
+            int ny = cy + dy[i];
+
+            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                if (grid[ny][nx] == 0) {
+                    grid[ny][nx] = fill_val;
+                    if (top < 4090) {
+                        stack_x[top] = nx;
+                        stack_y[top] = ny;
+                        top++;
+                    }
+                }
+            }
+        }
+    }
+    return area;
+}
+
+const char* parse_speed_limit(const uint32_t* features) {
+    const uint8_t dark_threshold = 90;
+
+    // 1. ADIM: Gürültüye dayanıklı yoğunluk sınırları (En az 2 siyah pikselli satır/sütunlar)
+    int min_y = 96, max_y = 0;
+    int min_x = 96, max_x = 0;
+
+    for (int y = 15; y < 80; y++) {
+        int row_count = 0;
+        for (int x = 15; x < 80; x++) {
+            if (get_gray(features[y * 96 + x]) < dark_threshold) row_count++;
+        }
+        if (row_count >= 2) {
+            if (y < min_y) min_y = y;
+            if (y > max_y) max_y = y;
+        }
+    }
+
+    for (int x = 15; x < 80; x++) {
+        int col_count = 0;
+        for (int y = min_y; y <= max_y; y++) {
+            if (get_gray(features[y * 96 + x]) < dark_threshold) col_count++;
+        }
+        if (col_count >= 2) {
+            if (x < min_x) min_x = x;
+            if (x > max_x) max_x = x;
+        }
+    }
+
+    if (min_y >= max_y || min_x >= max_x) return "SPEED_LIMIT_UNKNOWN";
+
+    int total_w = max_x - min_x;
+    int mid_x = min_x + (total_w / 2); // '0' rakamından ayırır
+
+    // 1. Rakamın gerçek sağ sınırını bul
+    int digit1_max_x = min_x;
+    for (int y = min_y; y <= max_y; y++) {
+        for (int x = min_x; x <= mid_x; x++) {
+            if (get_gray(features[y * 96 + x]) < dark_threshold) {
+                if (x > digit1_max_x) digit1_max_x = x;
+            }
+        }
+    }
+
+    int d_w = (digit1_max_x - min_x) + 1;
+    int d_h = (max_y - min_y) + 1;
+
+    // 2. ADIM: Garanti 2 piksel BEYAZ MARJLI (Padding) local_grid oluştur
+    // Marj sayesinde (0,0) noktası %100 kesintisiz dış arka plandır.
+    int grid_w = d_w + 4; 
+    int grid_h = d_h + 4; 
+
+    if (grid_w > 64) grid_w = 64;
+    if (grid_h > 64) grid_h = 64;
+
+    // Grid'i sıfırla (0: Beyaz Zemin)
+    for (int y = 0; y < grid_h; y++) {
+        for (int x = 0; x < grid_w; x++) {
+            local_grid[y][x] = 0;
+        }
+    }
+
+    // Rakamı marjın içine yerleştir (1: Siyah Çizgi)
+    for (int y = 0; y < d_h && (y + 2) < grid_h; y++) {
+        for (int x = 0; x < d_w && (x + 2) < grid_w; x++) {
+            int orig_x = min_x + x;
+            int orig_y = min_y + y;
+            if (get_gray(features[orig_y * 96 + orig_x]) < dark_threshold) {
+                local_grid[y + 2][x + 2] = 1;
+            }
+        }
+    }
+
+    // 3. ADIM: Dış Arka Planı (0,0) Marjından Başlayarak Doldur (2: Arka Plan)
+    flood_fill_area(local_grid, grid_w, grid_h, 0, 0, 2);
+
+    // 4. ADIM: İçeride Sıkışmış Gerçek Kapalı Delikleri (Holes) Say
+    int valid_hole_count = 0;
+
+    for (int y = 0; y < grid_h; y++) {
+        for (int x = 0; x < grid_w; x++) {
+            if (local_grid[y][x] == 0) { // Dışarıdan ulaşılamamış beyaz alan
+                int hole_area = flood_fill_area(local_grid, grid_w, grid_h, x, y, 3);
+                // Anti-aliasing ve parazitleri elemek için en az 4 piksellik delikleri say
+                if (hole_area >= 4) {
+                    valid_hole_count++;
+                }
+            }
+        }
+    }
+
+    printf("\n[TOPOLOJİ FIX] 1. Rakam Gerçek Delik Sayısı: %d\n", valid_hole_count);
+
+    // 5. ADIM: Topolojik Karar
+    if (valid_hole_count == 0) {
+        return "LIMIT50"; // '5' rakamı (Delik Yok)
+    } else if (valid_hole_count == 1) {
+        return "LIMIT90"; // '9' rakamı (1 Delik)
+    } else if (valid_hole_count >= 2) {
+        return "LIMIT80"; // '8' rakamı (2 Delik)
+    }
+
+    return "SPEED_LIMIT_UNKNOWN";
+}
+
+void print_ascii_matrix(const uint32_t* features) {
+    printf("\n=== TERMINAL RESIM HARITASI (96x96) ===\n");
+    for (int y = 15; y < 80; y += 2) { // Terminale sığması için 2 satırda bir bas
+        for (int x = 15; x < 80; x++) {
+            uint32_t pixel = features[y * 96 + x];
+            uint8_t r = (pixel >> 16) & 0xFF;
+            uint8_t g = (pixel >> 8)  & 0xFF;
+            uint8_t b =  pixel        & 0xFF;
+            uint8_t gray = (r + g + b) / 3;
+
+            if (gray < 90) {
+                printf("#"); // Siyah Piksel (Rakam)
+            } else {
+                printf("."); // Beyaz Zemin
+            }
+        }
+        printf("\n");
+    }
+    printf("=========================================\n");
+}

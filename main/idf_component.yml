@@ -1,0 +1,4 @@
+dependencies:
+  espressif/led_strip: ^3.0.0
+  espressif/esp-dsp: ^1.4.12
+  espressif/esp-nn: ^1.0.0
